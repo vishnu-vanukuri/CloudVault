@@ -1,0 +1,10 @@
+{
+  "name": "cloudvault-root",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CloudVault - Secure Cloud Storage and Automated Backup System",
+  "scripts": {
+    "build": "cd frontend && npm install && npm run build",
+    "start": "cd frontend && npm run preview"
+  }
+}

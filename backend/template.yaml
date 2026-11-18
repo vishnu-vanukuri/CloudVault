@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CloudVault - Secure Cloud Storage and Automated Backup System
+  Enterprise Serverless Architecture with S3 Versioning, Lifecycle, Cognito, and Lambda.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Deployment stage environment (dev, staging, prod)
+
+Resources:
+  # =========================================================================
+  # 1. AMAZON S3 SECURE PRIVATE STORAGE BUCKET
+  # =========================================================================
+  CloudVaultBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'cloudvault-storage-${AWS::AccountId}-${AWS::Region}-${EnvironmentName}'
+      # 100% Private - Block All Public Access
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Default Server-Side Encryption (AES-256)
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # S3 Versioning for accidental deletion and ransomware protection
+      VersioningConfiguration:
+        Status: Enabled
+      # CORS configuration for direct browser upload and download via Presigned URLs
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            ExposedHeaders:
+              - ETag
+              - x-amz-version-id
+            MaxAge: 3600
+      # Automated Backup & Lifecycle Management
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionNonCurrentVersionsToGlacier
+            Status: Enabled
+            NoncurrentVersionTransitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 365
+          - Id: CleanExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+
+  # =========================================================================
+  # 2. AMAZON COGNITO AUTHENTICATION LAYER
+  # =========================================================================
+  CloudVaultUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'cloudvault-users-${EnvironmentName}'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  CloudVaultUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub 'cloudvault-web-client-${EnvironmentName}'
+      UserPoolId: !Ref CloudVaultUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # =========================================================================
+  # 3. AWS IAM LEAST-PRIVILEGE ROLE FOR LAMBDA
+  # =========================================================================
+  CloudVaultLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CloudVault-LambdaRole-${EnvironmentName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CloudVaultS3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:PutObjectAcl
+                Resource: !Sub '${CloudVaultBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                Resource: !Sub '${CloudVaultBucket.Arn}'
+
+  # =========================================================================
+  # 4. SERVERLESS API GATEWAY (REST API)
+  # =========================================================================
+  CloudVaultApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref EnvironmentName
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-User-Id'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt CloudVaultUserPool.Arn
+            Identity:
+              Header: Authorization
+
+  # =========================================================================
+  # 5. AWS LAMBDA API HANDLER
+  # =========================================================================
+  CloudVaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'CloudVault-ApiHandler-${EnvironmentName}'
+      CodeUri: .
+      Handler: src/api-handler.handler
+      Runtime: nodejs20.x
+      Timeout: 15
+      MemorySize: 256
+      Role: !GetAtt CloudVaultLambdaRole.Arn
+      Environment:
+        Variables:
+          STORAGE_BUCKET_NAME: !Ref CloudVaultBucket
+      Events:
+        HealthCheck:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /health
+            Method: GET
+            Auth:
+              Authorizer: NONE
+        UploadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files/upload-url
+            Method: POST
+        ListFiles:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files
+            Method: GET
+        DownloadUrl:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files/download-url
+            Method: ANY
+        FileVersions:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files/versions
+            Method: ANY
+        RestoreVersion:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files/restore
+            Method: POST
+        DeleteFile:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files/delete
+            Method: ANY
+        DeleteFileRoot:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /files
+            Method: DELETE
+        StorageStats:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CloudVaultApi
+            Path: /dashboard/stats
+            Method: GET
+
+# =========================================================================
+# 6. STACK OUTPUTS
+# =========================================================================
+Outputs:
+  Region:
+    Description: AWS Deployment Region
+    Value: !Ref AWS::Region
+
+  ApiEndpointUrl:
+    Description: API Gateway REST Endpoint URL
+    Value: !Sub 'https://${CloudVaultApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
+
+  UserPoolId:
+    Description: Amazon Cognito User Pool ID
+    Value: !Ref CloudVaultUserPool
+
+  UserPoolClientId:
+    Description: Amazon Cognito App Client ID (no secret)
+    Value: !Ref CloudVaultUserPoolClient
+
+  StorageBucketName:
+    Description: Amazon S3 Private Storage Bucket Name
+    Value: !Ref CloudVaultBucket

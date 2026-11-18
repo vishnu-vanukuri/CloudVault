@@ -1,0 +1,17 @@
+{
+  "name": "cloudvault-backend",
+  "version": "1.0.0",
+  "description": "CloudVault Serverless Backend - AWS Lambda & S3 Integration",
+  "main": "src/api-handler.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "echo \"Backend ready\""
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/s3-request-presigner": "^3.700.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}
